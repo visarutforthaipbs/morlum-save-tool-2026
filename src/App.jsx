@@ -61,10 +61,14 @@ function findBestMatch(rawName, entities) {
 // ─── Role → colour map ────────────────────────────────────────────────────────
 const ROLE = {
   headliner: { label: "หมอลำ", bg: "#FEF3C7", color: "#92400E" },
+  guest_artist: { label: "รับเชิญ", bg: "#FFEDD5", color: "#C2410C" },
   dancer_troupe: { label: "แดนซ์", bg: "#FCE7F3", color: "#9D174D" },
   band: { label: "วง", bg: "#DBEAFE", color: "#1E3A8A" },
   sound: { label: "ซาวด์", bg: "#DCFCE7", color: "#14532D" },
+  sound_lighting: { label: "ซาวด์แอนด์ไลท์", bg: "#D1FAE5", color: "#065F46" },
   float: { label: "รถแห่", bg: "#EDE9FE", color: "#4C1D95" },
+  promoter: { label: "โปรโมเตอร์", bg: "#E0E7FF", color: "#3730A3" },
+  troupe_house: { label: "สำนัก", bg: "#F3E8FF", color: "#6B21A8" },
   unknown: { label: "?", bg: "#F3F4F6", color: "#374151" },
 };
 
@@ -699,10 +703,14 @@ function NewEntityRow({ rawName, res, form, onChange }) {
           value={form.role_type || res.role_type || "unknown"}
           onChange={e => onChange("role_type", e.target.value)}>
           <option value="headliner">หมอลำ</option>
+          <option value="guest_artist">รับเชิญ</option>
           <option value="dancer_troupe">แดนซ์</option>
           <option value="band">วง</option>
           <option value="sound">ซาวด์</option>
+          <option value="sound_lighting">ซาวด์แอนด์ไลท์</option>
           <option value="float">รถแห่</option>
+          <option value="promoter">โปรโมเตอร์</option>
+          <option value="troupe_house">สำนัก</option>
           <option value="unknown">ไม่แน่ใจ</option>
         </select>
       </div>
