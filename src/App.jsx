@@ -162,12 +162,18 @@ export default function MorLumPipeline() {
 
   function removeInvalidPerf(idx) {
     setPerfs((prev) => prev.filter((_, i) => i !== idx));
-    setValResults((prev) => ({
-      ...prev,
-      ...(Array.isArray(prev) ? { filtered: true } : {}),
-    }));
     if (Array.isArray(validationResults)) {
       setValResults(validationResults.filter((_, i) => i !== idx));
+    }
+  }
+
+  function updatePerfField(idx, field, value) {
+    setPerfs((prev) => prev.map((p, i) => i === idx ? { ...p, [field]: value } : p));
+    // Also update the validation result's copy so the UI stays in sync
+    if (Array.isArray(validationResults)) {
+      setValResults((prev) =>
+        prev.map((r, i) => i === idx ? { ...r, perf: { ...r.perf, [field]: value } } : r)
+      );
     }
   }
 
@@ -398,10 +404,11 @@ export default function MorLumPipeline() {
         {step === "validate" && (
           <div>
             <Card title="🔍 Step 2 — Validator">
-              <p style={s.hint}>ตรวจสอบชื่อจังหวัด และหาข้อมูลซ้ำในฐานข้อมูล</p>
-              <div style={{ display: "flex", gap: 10 }}>
+              <p style={s.hint}>ตรวจสอบชื่อจังหวัด และหาข้อมูลซ้ำ — แก้ไขได้เลยถ้าสะกดผิด</p>
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                <button style={s.ghostBtn} onClick={() => { setStep("paste"); setValResults(null); }}>← กลับแก้ JSON</button>
                 <Btn onClick={runValidation} disabled={validating}>
-                  {validating ? "⏳ กำลังตรวจสอบ..." : "🔍 เริ่มตรวจสอบ"}
+                  {validating ? "⏳ กำลังตรวจสอบ..." : validationResults ? "🔄 ตรวจสอบอีกครั้ง" : "🔍 เริ่มตรวจสอบ"}
                 </Btn>
                 {validationResults && !validationResults.error && (
                   <Btn onClick={proceedToResolve} secondary>ถัดไป: Entity Resolver →</Btn>
@@ -418,7 +425,10 @@ export default function MorLumPipeline() {
                   <Stat n={performances.length} label="รายการ" />
                   <Stat n={validationResults.filter(r => r.ok).length} label="ผ่าน" color="#34D399" />
                   <Stat n={validationResults.filter(r => !r.ok).length} label="มีปัญหา" color="#F87171" />
-                  <div style={{ marginLeft: "auto" }}>
+                  <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
+                    <Btn onClick={runValidation} disabled={validating} secondary>
+                      🔄 ตรวจใหม่
+                    </Btn>
                     <Btn onClick={proceedToResolve} disabled={validating}>
                       ถัดไป: Entity Resolver →
                     </Btn>
@@ -436,13 +446,43 @@ export default function MorLumPipeline() {
                         <span style={{ fontSize: 12, fontWeight: 600, color: "#D97706" }}>
                           {r.perf.performance_date}
                         </span>
-                        {!r.ok && (
-                          <button style={s.removeBtn} onClick={() => removeInvalidPerf(idx)}>✕ ลบ</button>
-                        )}
+                        <button style={s.removeBtn} onClick={() => removeInvalidPerf(idx)}>✕ ลบ</button>
                       </div>
-                      <div style={{ fontSize: 12, color: "#D1D5DB", margin: "4px 0" }}>
-                        📍 {[r.perf.village, r.perf.district, r.perf.province].filter(Boolean).join(" › ")}
-                      </div>
+
+                      {/* Editable location fields */}
+                      {!r.ok ? (
+                        <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 4 }}>
+                          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                            <span style={s.fieldLabel}>จังหวัด</span>
+                            <input style={s.inlineInput}
+                              value={r.perf.province || ""}
+                              onChange={e => updatePerfField(idx, "province", e.target.value)} />
+                          </div>
+                          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                            <span style={s.fieldLabel}>อำเภอ</span>
+                            <input style={s.inlineInput}
+                              value={r.perf.district || ""}
+                              onChange={e => updatePerfField(idx, "district", e.target.value)} />
+                          </div>
+                          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                            <span style={s.fieldLabel}>ตำบล</span>
+                            <input style={s.inlineInput}
+                              value={r.perf.subdistrict || ""}
+                              onChange={e => updatePerfField(idx, "subdistrict", e.target.value)} />
+                          </div>
+                          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                            <span style={s.fieldLabel}>หมู่บ้าน</span>
+                            <input style={s.inlineInput}
+                              value={r.perf.village || ""}
+                              onChange={e => updatePerfField(idx, "village", e.target.value)} />
+                          </div>
+                        </div>
+                      ) : (
+                        <div style={{ fontSize: 12, color: "#D1D5DB", margin: "4px 0" }}>
+                          📍 {[r.perf.village, r.perf.district, r.perf.province].filter(Boolean).join(" › ")}
+                        </div>
+                      )}
+
                       {r.issues.map((issue, ii) => (
                         <div key={ii} style={s.issueTag}>
                           {issue.type === "duplicate" ? "🔁" : "⚠️"} {issue.msg}
@@ -654,4 +694,6 @@ const s = {
   roleBadge: { fontSize: 10, fontWeight: 700, padding: "1px 6px", borderRadius: 6, minWidth: 32, textAlign: "center" },
   confirmBtn: { background: "#052E16", border: "1px solid #166534", borderRadius: 6, padding: "4px 10px", color: "#34D399", cursor: "pointer", fontSize: 12, fontFamily: "inherit" },
   rejectBtn: { background: "#1F0A0A", border: "1px solid #7F1D1D", borderRadius: 6, padding: "4px 10px", color: "#F87171", cursor: "pointer", fontSize: 12, fontFamily: "inherit" },
+  fieldLabel: { fontSize: 10, color: "#6B7280", minWidth: 48, textAlign: "right" },
+  inlineInput: { background: "#111827", border: "1px solid #374151", borderRadius: 6, padding: "4px 8px", color: "#F9FAFB", fontSize: 13, fontFamily: "inherit", outline: "none", flex: 1 },
 };
