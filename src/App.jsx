@@ -72,13 +72,13 @@ const STATUS_COLOR = { exact: "#34D399", suggested: "#FBBF24", new: "#F87171" };
 const STATUS_LABEL = { exact: "✅ ตรงเป๊ะ", suggested: "⚠️ ใกล้เคียง", new: "🆕 ใหม่" };
 
 // ─── Step indicator ───────────────────────────────────────────────────────────
-const STEPS = ["credentials", "paste", "validate", "resolve", "done"];
+const STEPS = ["paste", "validate", "resolve", "done"];
 
 // ─── Main component ───────────────────────────────────────────────────────────
 export default function MorLumPipeline() {
-  const [step, setStep] = useState("credentials");
-  const [sbUrl, setSbUrl] = useState("");
-  const [sbKey, setSbKey] = useState("");
+  const [step, setStep] = useState("paste");
+  const sbUrl = import.meta.env.VITE_SUPABASE_URL || "";
+  const sbKey = import.meta.env.VITE_SUPABASE_ANON_KEY || "";
   const [rawText, setRawText] = useState("");
   const [postDate, setPostDate] = useState("");
   const [jsonText, setJsonText] = useState("");
@@ -100,25 +100,7 @@ export default function MorLumPipeline() {
   const [savedCount, setSaved] = useState(0);
   const [saveErr, setSaveErr] = useState(null);
 
-  // ── Load saved credentials ────────────────────────────────────────────────
-  useEffect(() => {
-    (async () => {
-      try {
-        const u = await window.storage.get("sb_url");
-        const k = await window.storage.get("sb_key");
-        if (u?.value) setSbUrl(u.value);
-        if (k?.value) setSbKey(k.value);
-        if (u?.value && k?.value) setStep("paste");
-      } catch { }
-    })();
-  }, []);
 
-  // ── Step 1 : Save credentials ─────────────────────────────────────────────
-  async function saveCredentials() {
-    await window.storage.set("sb_url", sbUrl.trim());
-    await window.storage.set("sb_key", sbKey.trim());
-    setStep("paste");
-  }
 
   // ── Step 2 : Parse JSON ───────────────────────────────────────────────────
   function parseJSON() {
@@ -360,8 +342,8 @@ export default function MorLumPipeline() {
         {/* Step progress */}
         <div style={{ display: "flex", gap: 0, alignItems: "center" }}>
           {["Paste", "Validate", "Resolve", "Save"].map((label, i) => {
-            const active = stepIdx === i + 1;
-            const done = stepIdx > i + 1;
+            const active = stepIdx === i;
+            const done = stepIdx > i || stepIdx === 3;
             return (
               <div key={label} style={{ display: "flex", alignItems: "center" }}>
                 <div style={{
@@ -380,16 +362,7 @@ export default function MorLumPipeline() {
 
       <div style={s.body}>
 
-        {/* ── CREDENTIALS ─────────────────────────────────────────────────── */}
-        {step === "credentials" && (
-          <Card title="🔑 ตั้งค่า Supabase" hint="ทำครั้งเดียว ระบบจำไว้">
-            <Label>Project URL</Label>
-            <Input value={sbUrl} onChange={setSbUrl} placeholder="https://xxxx.supabase.co" />
-            <Label>Anon Public Key</Label>
-            <Input value={sbKey} onChange={setSbKey} placeholder="eyJ..." type="password" />
-            <Btn onClick={saveCredentials} disabled={!sbUrl || !sbKey}>บันทึกและเริ่มใช้งาน →</Btn>
-          </Card>
-        )}
+
 
         {/* ── PASTE ────────────────────────────────────────────────────────── */}
         {step === "paste" && (
