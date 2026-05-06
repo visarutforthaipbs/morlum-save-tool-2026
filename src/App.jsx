@@ -262,17 +262,30 @@ export default function MorLumPipeline() {
       for (const [rawName, res] of Object.entries(resolution)) {
         if (res.status === "new") {
           const form = newEntityForms[rawName] || {};
-          const newEnt = await sbPost(sbUrl, sbKey, "entities", [{
-            canonical_name: form.canonical_name || rawName,
-            role_type: form.role_type || res.role_type || "unknown",
-            aliases: [rawName],
-          }]);
-          if (newEnt[0]) {
+          const targetCanonicalName = form.canonical_name || rawName;
+          
+          // Defensive check: does this canonical_name already exist?
+          // (Handles cases where user types an existing name, or multiple raw names resolve to the same new canonical name)
+          const existing = await sbGet(sbUrl, sbKey, "entities", `canonical_name=eq.${encodeURIComponent(targetCanonicalName)}&select=id`);
+          
+          let entityId;
+          if (existing && existing.length > 0) {
+            entityId = existing[0].id;
+          } else {
+            const newEnt = await sbPost(sbUrl, sbKey, "entities", [{
+              canonical_name: targetCanonicalName,
+              role_type: form.role_type || res.role_type || "unknown",
+              aliases: [rawName],
+            }]);
+            if (newEnt[0]) entityId = newEnt[0].id;
+          }
+
+          if (entityId) {
             setResolution((prev) => ({
               ...prev,
-              [rawName]: { ...prev[rawName], entity_id: newEnt[0].id, status: "exact" },
+              [rawName]: { ...prev[rawName], entity_id: entityId, status: "exact" },
             }));
-            resolution[rawName].entity_id = newEnt[0].id;
+            resolution[rawName].entity_id = entityId;
           }
         }
       }
