@@ -1,94 +1,282 @@
-import { useState, useEffect } from "react";
+"use client";
+// MorLum Pipeline Tool — Parser → Validator → Entity Resolver → Save
+// Steps: credentials → paste → validate → resolve → save → done
 
-const ROLE_META = {
-  headliner:     { label: "หมอลำ",  color: "#92400E", bg: "#FEF3C7" },
-  dancer_troupe: { label: "แดนซ์",  color: "#9D174D", bg: "#FCE7F3" },
-  band:          { label: "วง",     color: "#1E3A8A", bg: "#DBEAFE" },
-  sound:         { label: "ซาวด์",  color: "#14532D", bg: "#DCFCE7" },
-  float:         { label: "รถแห่",  color: "#4C1D95", bg: "#EDE9FE" },
-  unknown:       { label: "?",      color: "#374151", bg: "#F3F4F6" },
-};
+import { useState, useEffect, useCallback } from "react";
 
-async function supabaseInsert(url, key, table, rows) {
+// ─── Supabase REST helpers ────────────────────────────────────────────────────
+async function sbGet(url, key, table, params = "") {
+  const res = await fetch(`${url}/rest/v1/${table}?${params}`, {
+    headers: { apikey: key, Authorization: `Bearer ${key}` },
+  });
+  if (!res.ok) throw new Error((await res.json().catch(() => ({}))).message || res.statusText);
+  return res.json();
+}
+async function sbPost(url, key, table, rows) {
   const res = await fetch(`${url}/rest/v1/${table}`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "apikey": key,
-      "Authorization": `Bearer ${key}`,
-      "Prefer": "return=representation",
+      apikey: key,
+      Authorization: `Bearer ${key}`,
+      Prefer: "return=representation",
     },
     body: JSON.stringify(rows),
   });
-  if (!res.ok) {
-    const err = await res.json();
-    throw new Error(err.message || res.statusText);
-  }
+  if (!res.ok) throw new Error((await res.json().catch(() => ({}))).message || res.statusText);
   return res.json();
 }
 
-export default function MorLumSaveTool() {
-  const [step, setStep] = useState("credentials"); // credentials | paste | preview | done
+// ─── Fuzzy match helpers ──────────────────────────────────────────────────────
+function similarity(a, b) {
+  a = a.toLowerCase().trim();
+  b = b.toLowerCase().trim();
+  if (a === b) return 1.0;
+  if (a.includes(b) || b.includes(a)) return 0.85;
+  // Trigram similarity
+  const trigrams = (s) => {
+    const t = new Set();
+    for (let i = 0; i < s.length - 2; i++) t.add(s.slice(i, i + 3));
+    return t;
+  };
+  const ta = trigrams(a), tb = trigrams(b);
+  const intersect = [...ta].filter((x) => tb.has(x)).length;
+  return (2 * intersect) / (ta.size + tb.size);
+}
+
+function findBestMatch(rawName, entities) {
+  let best = null, bestScore = 0;
+  for (const e of entities) {
+    const names = [e.canonical_name, ...(e.aliases || [])];
+    for (const n of names) {
+      const score = similarity(rawName, n);
+      if (score > bestScore) { bestScore = score; best = e; }
+    }
+  }
+  if (bestScore >= 0.95) return { entity: best, score: bestScore, status: "exact" };
+  if (bestScore >= 0.70) return { entity: best, score: bestScore, status: "suggested" };
+  return { entity: null, score: bestScore, status: "new" };
+}
+
+// ─── Role → colour map ────────────────────────────────────────────────────────
+const ROLE = {
+  headliner: { label: "หมอลำ", bg: "#FEF3C7", color: "#92400E" },
+  dancer_troupe: { label: "แดนซ์", bg: "#FCE7F3", color: "#9D174D" },
+  band: { label: "วง", bg: "#DBEAFE", color: "#1E3A8A" },
+  sound: { label: "ซาวด์", bg: "#DCFCE7", color: "#14532D" },
+  float: { label: "รถแห่", bg: "#EDE9FE", color: "#4C1D95" },
+  unknown: { label: "?", bg: "#F3F4F6", color: "#374151" },
+};
+
+const STATUS_COLOR = { exact: "#34D399", suggested: "#FBBF24", new: "#F87171" };
+const STATUS_LABEL = { exact: "✅ ตรงเป๊ะ", suggested: "⚠️ ใกล้เคียง", new: "🆕 ใหม่" };
+
+// ─── Step indicator ───────────────────────────────────────────────────────────
+const STEPS = ["credentials", "paste", "validate", "resolve", "done"];
+
+// ─── Main component ───────────────────────────────────────────────────────────
+export default function MorLumPipeline() {
+  const [step, setStep] = useState("credentials");
   const [sbUrl, setSbUrl] = useState("");
   const [sbKey, setSbKey] = useState("");
   const [rawText, setRawText] = useState("");
   const [postDate, setPostDate] = useState("");
   const [jsonText, setJsonText] = useState("");
-  const [performances, setPerformances] = useState([]);
-  const [parseError, setParseError] = useState(null);
-  const [saving, setSaving] = useState(false);
-  const [savedCount, setSavedCount] = useState(0);
-  const [saveError, setSaveError] = useState(null);
+  const [performances, setPerfs] = useState([]);
+  const [parseErr, setParseErr] = useState(null);
 
-  // Load saved credentials
+  // Validator state
+  const [validating, setValidating] = useState(false);
+  const [validationResults, setValResults] = useState(null); // { provinces, duplicates }
+
+  // Entity resolver state
+  const [entities, setEntities] = useState([]);     // canonical entities from DB
+  const [resolution, setResolution] = useState({});     // { raw_name → { entity_id, status, canonical_name } }
+  const [resolving, setResolving] = useState(false);
+  const [newEntityForms, setNewForms] = useState({});     // raw_name → { canonical_name, role_type }
+
+  // Save state
+  const [saving, setSaving] = useState(false);
+  const [savedCount, setSaved] = useState(0);
+  const [saveErr, setSaveErr] = useState(null);
+
+  // ── Load saved credentials ────────────────────────────────────────────────
   useEffect(() => {
-    try {
-      const u = localStorage.getItem("sb_url");
-      const k = localStorage.getItem("sb_key");
-      if (u) setSbUrl(u);
-      if (k) setSbKey(k);
-      if (u && k) setStep("paste");
-    } catch {}
+    (async () => {
+      try {
+        const u = await window.storage.get("sb_url");
+        const k = await window.storage.get("sb_key");
+        if (u?.value) setSbUrl(u.value);
+        if (k?.value) setSbKey(k.value);
+        if (u?.value && k?.value) setStep("paste");
+      } catch { }
+    })();
   }, []);
 
-  function saveCredentials() {
-    if (!sbUrl.trim() || !sbKey.trim()) return;
-    try {
-      localStorage.setItem("sb_url", sbUrl.trim());
-      localStorage.setItem("sb_key", sbKey.trim());
-      setStep("paste");
-    } catch (e) {
-      alert("Could not save credentials: " + e.message);
-    }
+  // ── Step 1 : Save credentials ─────────────────────────────────────────────
+  async function saveCredentials() {
+    await window.storage.set("sb_url", sbUrl.trim());
+    await window.storage.set("sb_key", sbKey.trim());
+    setStep("paste");
   }
 
+  // ── Step 2 : Parse JSON ───────────────────────────────────────────────────
   function parseJSON() {
-    setParseError(null);
+    setParseErr(null);
     try {
-      const cleaned = jsonText.trim()
-        .replace(/^```json\s*/i, "")
-        .replace(/^```/i, "")
-        .replace(/```$/i, "")
-        .trim();
-      const parsed = JSON.parse(cleaned);
-      if (!Array.isArray(parsed)) throw new Error("Expected a JSON array");
-      setPerformances(parsed);
-      setStep("preview");
+      const clean = jsonText.trim()
+        .replace(/^```json\s*/i, "").replace(/^```/i, "").replace(/```$/i, "").trim();
+      const arr = JSON.parse(clean);
+      if (!Array.isArray(arr)) throw new Error("Expected JSON array");
+      setPerfs(arr);
+      setStep("validate");
+    } catch (e) { setParseErr("JSON ไม่ถูกต้อง: " + e.message); }
+  }
+
+  // ── Step 3 : Validate ─────────────────────────────────────────────────────
+  async function runValidation() {
+    setValidating(true);
+    try {
+      // 1. Load province master list
+      const provinces = await sbGet(sbUrl, sbKey, "provinces", "select=name_th");
+      const validProvinces = new Set(provinces.map((p) => p.name_th));
+
+      // 2. Check each performance
+      const results = await Promise.all(
+        performances.map(async (perf) => {
+          const issues = [];
+
+          // Province check
+          if (perf.province && !validProvinces.has(perf.province)) {
+            issues.push({ type: "province", msg: `"${perf.province}" ไม่อยู่ใน master list` });
+          }
+
+          // Duplicate check
+          if (perf.performance_date && perf.province) {
+            const dupes = await sbGet(
+              sbUrl, sbKey, "performances",
+              `performance_date=eq.${perf.performance_date}&province=eq.${encodeURIComponent(perf.province)}&select=id,village,raw_line&limit=3`
+            );
+            if (dupes.length > 0) {
+              // Check if same village/raw_line already exists
+              const exactDupe = dupes.find(
+                (d) => d.village === perf.village || d.raw_line === perf.raw_line
+              );
+              if (exactDupe) issues.push({ type: "duplicate", msg: "อาจซ้ำกับข้อมูลที่มีอยู่แล้ว" });
+            }
+          }
+
+          return { perf, issues, ok: issues.length === 0 };
+        })
+      );
+
+      setValResults(results);
     } catch (e) {
-      setParseError("JSON ไม่ถูกต้อง: " + e.message);
+      setValResults({ error: e.message });
+    } finally {
+      setValidating(false);
     }
   }
 
-  function removePerf(idx) {
-    setPerformances(p => p.filter((_, i) => i !== idx));
+  function removeInvalidPerf(idx) {
+    setPerfs((prev) => prev.filter((_, i) => i !== idx));
+    setValResults((prev) => ({
+      ...prev,
+      ...(Array.isArray(prev) ? { filtered: true } : {}),
+    }));
+    if (Array.isArray(validationResults)) {
+      setValResults(validationResults.filter((_, i) => i !== idx));
+    }
   }
 
+  function proceedToResolve() {
+    // Remove performances flagged as duplicates (optional — user can keep)
+    setStep("resolve");
+    loadEntitiesAndResolve();
+  }
+
+  // ── Step 4 : Entity resolution ────────────────────────────────────────────
+  async function loadEntitiesAndResolve() {
+    setResolving(true);
+    try {
+      const ents = await sbGet(sbUrl, sbKey, "entities", "select=id,canonical_name,role_type,aliases&limit=2000");
+      setEntities(ents);
+
+      // Collect all unique artist raw_names across all performances
+      const allArtists = {};
+      for (const perf of performances) {
+        for (const a of perf.artists || []) {
+          if (!allArtists[a.raw_name]) allArtists[a.raw_name] = a.role_type;
+        }
+      }
+
+      // Resolve each
+      const res = {};
+      for (const [rawName, roleType] of Object.entries(allArtists)) {
+        const match = findBestMatch(rawName, ents);
+        res[rawName] = {
+          status: match.status,
+          entity_id: match.entity?.id || null,
+          canonical_name: match.entity?.canonical_name || rawName,
+          role_type: roleType,
+          score: match.score,
+        };
+      }
+      setResolution(res);
+    } catch (e) {
+      console.error("Entity load error", e);
+    } finally {
+      setResolving(false);
+    }
+  }
+
+  function confirmSuggestion(rawName) {
+    setResolution((prev) => ({
+      ...prev,
+      [rawName]: { ...prev[rawName], status: "exact" },
+    }));
+  }
+
+  function rejectSuggestion(rawName) {
+    setResolution((prev) => ({
+      ...prev,
+      [rawName]: { ...prev[rawName], status: "new", entity_id: null },
+    }));
+  }
+
+  function updateNewForm(rawName, field, value) {
+    setNewForms((prev) => ({
+      ...prev,
+      [rawName]: { ...(prev[rawName] || {}), [field]: value },
+    }));
+  }
+
+  // ── Step 5 : Save ─────────────────────────────────────────────────────────
   async function saveAll() {
     setSaving(true);
-    setSaveError(null);
+    setSaveErr(null);
     try {
-      // 1. Save raw post
-      const rawRows = await supabaseInsert(sbUrl, sbKey, "raw_posts", [{
+      // 1. Create new entities first
+      for (const [rawName, res] of Object.entries(resolution)) {
+        if (res.status === "new") {
+          const form = newEntityForms[rawName] || {};
+          const newEnt = await sbPost(sbUrl, sbKey, "entities", [{
+            canonical_name: form.canonical_name || rawName,
+            role_type: form.role_type || res.role_type || "unknown",
+            aliases: [rawName],
+          }]);
+          if (newEnt[0]) {
+            setResolution((prev) => ({
+              ...prev,
+              [rawName]: { ...prev[rawName], entity_id: newEnt[0].id, status: "exact" },
+            }));
+            resolution[rawName].entity_id = newEnt[0].id;
+          }
+        }
+      }
+
+      // 2. Save raw post
+      const rawRows = await sbPost(sbUrl, sbKey, "raw_posts", [{
         post_date: postDate || performances[0]?.performance_date || null,
         raw_text: rawText || jsonText,
         parsed: true,
@@ -96,242 +284,279 @@ export default function MorLumSaveTool() {
       }]);
       const rawPostId = rawRows[0]?.id;
 
-      let savedN = 0;
+      // 3. Save each performance + artists
+      let n = 0;
       for (const perf of performances) {
-        const { artists, ...perfData } = perf;
-
-        // 2. Save performance
-        const perfRows = await supabaseInsert(sbUrl, sbKey, "performances", [{
+        const { artists, ...pd } = perf;
+        const perfRows = await sbPost(sbUrl, sbKey, "performances", [{
           raw_post_id: rawPostId,
-          performance_date: perfData.performance_date,
-          province: perfData.province,
-          district: perfData.district,
-          subdistrict: perfData.subdistrict,
-          village: perfData.village,
-          venue: perfData.venue,
-          event_type: perfData.event_type,
-          period: perfData.period,
-          time_start: perfData.time_start,
-          time_end: perfData.time_end,
-          raw_line: perfData.raw_line,
-          confidence: perfData.confidence,
-          flagged: perfData.flagged ?? (perfData.confidence < 0.7),
-          flag_reason: perfData.flag_reason,
+          performance_date: pd.performance_date,
+          province: pd.province,
+          district: pd.district,
+          subdistrict: pd.subdistrict,
+          village: pd.village,
+          venue: pd.venue,
+          event_type: pd.event_type,
+          period: pd.period,
+          time_start: pd.time_start,
+          time_end: pd.time_end,
+          raw_line: pd.raw_line,
+          confidence: pd.confidence,
+          flagged: pd.flagged ?? (pd.confidence < 0.7),
+          flag_reason: pd.flag_reason,
           validated: false,
         }]);
         const perfId = perfRows[0]?.id;
 
-        // 3. Save artists
         if (artists?.length && perfId) {
-          await supabaseInsert(sbUrl, sbKey, "performance_artists",
-            artists.map(a => ({
+          await sbPost(sbUrl, sbKey, "performance_artists",
+            artists.map((a) => ({
               performance_id: perfId,
               raw_name: a.raw_name,
               role_type: a.role_type,
-              resolved: false,
+              entity_id: resolution[a.raw_name]?.entity_id || null,
+              resolved: !!resolution[a.raw_name]?.entity_id,
+              resolution_method: resolution[a.raw_name]?.status === "exact" ? "auto" : "manual",
             }))
           );
         }
-        savedN++;
+        n++;
       }
 
-      setSavedCount(savedN);
+      setSaved(n);
       setStep("done");
     } catch (e) {
-      setSaveError(e.message);
+      setSaveErr(e.message);
     } finally {
       setSaving(false);
     }
   }
 
   function reset() {
-    setJsonText("");
-    setRawText("");
-    setPostDate("");
-    setPerformances([]);
-    setParseError(null);
-    setSaveError(null);
-    setSavedCount(0);
-    setStep("paste");
+    setJsonText(""); setRawText(""); setPostDate(""); setPerfs([]);
+    setParseErr(null); setValResults(null); setResolution({}); setNewForms({});
+    setSaveErr(null); setSaved(0); setStep("paste");
   }
 
-  const flagged = performances.filter(p => p.flagged || p.confidence < 0.7).length;
+  // ─── Derived counts ────────────────────────────────────────────────────────
+  const resEntries = Object.entries(resolution);
+  const exactCount = resEntries.filter(([, v]) => v.status === "exact").length;
+  const suggestedCount = resEntries.filter(([, v]) => v.status === "suggested").length;
+  const newCount = resEntries.filter(([, v]) => v.status === "new").length;
+  const stepIdx = STEPS.indexOf(step);
 
+  // ─── Render ────────────────────────────────────────────────────────────────
   return (
     <div style={s.root}>
+      {/* Header */}
       <div style={s.header}>
-        <div>
-          <span style={s.logo}>🎭</span>
-          <span style={s.title}>MorLum Save Tool</span>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <span style={{ fontSize: 20 }}>🎭</span>
+          <div>
+            <div style={s.title}>MorLum Pipeline</div>
+            <div style={s.subtitle}>Parser → Validator → Entity Resolver → Save</div>
+          </div>
         </div>
-        <div style={s.steps}>
-          {["credentials","paste","preview","done"].map((st, i) => (
-            <div key={st} style={{
-              ...s.stepDot,
-              background: step === st ? "#D97706"
-                : ["credentials","paste","preview","done"].indexOf(step) > i ? "#059669" : "#374151"
-            }} />
-          ))}
+        {/* Step progress */}
+        <div style={{ display: "flex", gap: 0, alignItems: "center" }}>
+          {["Paste", "Validate", "Resolve", "Save"].map((label, i) => {
+            const active = stepIdx === i + 1;
+            const done = stepIdx > i + 1;
+            return (
+              <div key={label} style={{ display: "flex", alignItems: "center" }}>
+                <div style={{
+                  ...s.stepPill,
+                  background: done ? "#059669" : active ? "#D97706" : "#374151",
+                  color: done || active ? "#fff" : "#9CA3AF",
+                }}>
+                  {done ? "✓ " : ""}{label}
+                </div>
+                {i < 3 && <div style={s.stepArrow}>→</div>}
+              </div>
+            );
+          })}
         </div>
       </div>
 
       <div style={s.body}>
 
-        {/* ── STEP: CREDENTIALS ── */}
+        {/* ── CREDENTIALS ─────────────────────────────────────────────────── */}
         {step === "credentials" && (
-          <div style={s.card}>
-            <h2 style={s.cardTitle}>🔑 ตั้งค่า Supabase</h2>
-            <p style={s.hint}>ทำครั้งเดียว — ระบบจำไว้ให้</p>
-            <label style={s.label}>Project URL</label>
-            <input style={s.input} value={sbUrl}
-              onChange={e => setSbUrl(e.target.value)}
-              placeholder="https://xxxx.supabase.co" />
-            <label style={s.label}>Anon Public Key</label>
-            <input style={s.input} value={sbKey}
-              onChange={e => setSbKey(e.target.value)}
-              placeholder="eyJhbGciOiJIUzI1NiIs..." type="password" />
-            <button style={s.primaryBtn}
-              onClick={saveCredentials}
-              disabled={!sbUrl || !sbKey}>
-              บันทึกและเริ่มใช้งาน →
-            </button>
-          </div>
+          <Card title="🔑 ตั้งค่า Supabase" hint="ทำครั้งเดียว ระบบจำไว้">
+            <Label>Project URL</Label>
+            <Input value={sbUrl} onChange={setSbUrl} placeholder="https://xxxx.supabase.co" />
+            <Label>Anon Public Key</Label>
+            <Input value={sbKey} onChange={setSbKey} placeholder="eyJ..." type="password" />
+            <Btn onClick={saveCredentials} disabled={!sbUrl || !sbKey}>บันทึกและเริ่มใช้งาน →</Btn>
+          </Card>
         )}
 
-        {/* ── STEP: PASTE ── */}
+        {/* ── PASTE ────────────────────────────────────────────────────────── */}
         {step === "paste" && (
-          <div style={s.card}>
-            <div style={s.cardRow}>
-              <h2 style={s.cardTitle}>📋 วาง JSON จาก Claude</h2>
-              <button style={s.ghostBtn}
-                onClick={() => { setStep("credentials"); }}>
-                ⚙️ ตั้งค่า
-              </button>
+          <Card title="📋 Step 1 — วาง JSON จาก Claude" hint={
+            <>1. เปิด Project <b>MorLum Parser</b> → วางโพสต์ → Copy JSON<br />2. วาง JSON ลงด้านล่าง</>
+          }>
+            <div style={{ display: "flex", gap: 10 }}>
+              <div style={{ flex: 1 }}>
+                <Label>วันที่โพสต์</Label>
+                <Input value={postDate} onChange={setPostDate} placeholder="2026-05-06" />
+              </div>
             </div>
-            <p style={s.hint}>
-              1. เปิด Project <strong>MorLum Parser</strong> ใน Claude.ai<br/>
-              2. วางโพสต์ Facebook แล้วส่ง<br/>
-              3. Copy JSON ที่ได้ → วางลงด้านล่าง
-            </p>
-
-            <label style={s.label}>วันที่ (optional — ถ้า Claude ใส่มาแล้วไม่ต้องกรอก)</label>
-            <input style={s.input} value={postDate}
-              onChange={e => setPostDate(e.target.value)}
-              placeholder="2026-05-06" />
-
-            <label style={s.label}>ข้อความโพสต์ต้นฉบับ (optional — เก็บไว้เป็น archive)</label>
-            <textarea style={{...s.input, height: 60, resize: "vertical"}}
-              value={rawText}
-              onChange={e => setRawText(e.target.value)}
-              placeholder="วางข้อความดิบจาก Facebook (ถ้ามี)" />
-
-            <label style={s.label}>JSON จาก Claude *</label>
-            <textarea style={{...s.input, height: 200, fontFamily: "monospace", fontSize: 12, resize: "vertical"}}
-              value={jsonText}
-              onChange={e => setJsonText(e.target.value)}
-              placeholder='[{"performance_date": "2026-05-06", ...}]' />
-
-            {parseError && <div style={s.errorBox}>{parseError}</div>}
-
-            <button style={s.primaryBtn}
-              onClick={parseJSON}
-              disabled={!jsonText.trim()}>
-              ตรวจสอบ JSON →
-            </button>
-          </div>
+            <Label>ข้อความโพสต์ต้นฉบับ (optional)</Label>
+            <Textarea value={rawText} onChange={setRawText} rows={3} placeholder="วางข้อความดิบ (สำหรับ archive)" />
+            <Label>JSON จาก Claude *</Label>
+            <Textarea value={jsonText} onChange={setJsonText} rows={10} mono
+              placeholder='[{"performance_date":"2026-05-06","province":"ร้อยเอ็ด",...}]' />
+            {parseErr && <Err>{parseErr}</Err>}
+            <Btn onClick={parseJSON} disabled={!jsonText.trim()}>ตรวจสอบ JSON →</Btn>
+          </Card>
         )}
 
-        {/* ── STEP: PREVIEW ── */}
-        {step === "preview" && (
+        {/* ── VALIDATE ─────────────────────────────────────────────────────── */}
+        {step === "validate" && (
           <div>
-            {/* Summary */}
-            <div style={s.summaryBar}>
-              <div style={s.summaryItem}>
-                <span style={s.summaryNum}>{performances.length}</span>
-                <span style={s.summaryLbl}>รายการ</span>
+            <Card title="🔍 Step 2 — Validator">
+              <p style={s.hint}>ตรวจสอบชื่อจังหวัด และหาข้อมูลซ้ำในฐานข้อมูล</p>
+              <div style={{ display: "flex", gap: 10 }}>
+                <Btn onClick={runValidation} disabled={validating}>
+                  {validating ? "⏳ กำลังตรวจสอบ..." : "🔍 เริ่มตรวจสอบ"}
+                </Btn>
+                {validationResults && !validationResults.error && (
+                  <Btn onClick={proceedToResolve} secondary>ถัดไป: Entity Resolver →</Btn>
+                )}
               </div>
-              <div style={s.summaryItem}>
-                <span style={{...s.summaryNum, color: "#F87171"}}>{flagged}</span>
-                <span style={s.summaryLbl}>ต้องตรวจสอบ</span>
-              </div>
-              <div style={s.summaryItem}>
-                <span style={{...s.summaryNum, color: "#34D399"}}>{performances.length - flagged}</span>
-                <span style={s.summaryLbl}>ดี</span>
-              </div>
-              <div style={{marginLeft: "auto", display: "flex", gap: 8}}>
-                <button style={s.ghostBtn} onClick={() => setStep("paste")}>← แก้ไข</button>
-                <button style={{...s.primaryBtn, margin: 0}}
-                  onClick={saveAll} disabled={saving || performances.length === 0}>
-                  {saving ? "⏳ กำลังบันทึก..." : `💾 บันทึก ${performances.length} รายการ → Supabase`}
-                </button>
-              </div>
-            </div>
+            </Card>
 
-            {saveError && <div style={{...s.errorBox, marginBottom: 12}}>{saveError}</div>}
+            {validationResults?.error && <Err>{validationResults.error}</Err>}
 
-            {/* Cards */}
-            <div style={s.grid}>
-              {performances.map((p, idx) => (
-                <div key={idx} style={{
-                  ...s.perfCard,
-                  borderLeft: `3px solid ${p.flagged || p.confidence < 0.7 ? "#EF4444" : "#10B981"}`
-                }}>
-                  <div style={s.perfHeader}>
-                    <div style={{display:"flex", gap:6, flexWrap:"wrap", alignItems:"center"}}>
-                      <span style={s.dateChip}>{p.performance_date}</span>
-                      {p.period && <span style={s.periodChip}>{p.period}</span>}
-                      {(p.flagged || p.confidence < 0.7) && (
-                        <span style={s.flagChip}>⚠️ {p.flag_reason || "ตรวจสอบ"}</span>
-                      )}
-                    </div>
-                    <div style={{display:"flex", gap:6, alignItems:"center"}}>
-                      <span style={{
-                        ...s.confChip,
-                        background: p.confidence >= 0.9 ? "#DCFCE7" : p.confidence >= 0.7 ? "#FEF9C3" : "#FEE2E2",
-                        color: p.confidence >= 0.9 ? "#166534" : p.confidence >= 0.7 ? "#854D0E" : "#991B1B",
-                      }}>{Math.round((p.confidence||0)*100)}%</span>
-                      <button style={s.removeBtn} onClick={() => removePerf(idx)}>✕</button>
-                    </div>
-                  </div>
-
-                  <div style={s.location}>
-                    📍 {[p.village, p.venue, p.subdistrict, p.district, p.province].filter(Boolean).join(" › ")}
-                  </div>
-
-                  {p.event_type && <div style={s.eventType}>🎊 {p.event_type}</div>}
-                  {(p.time_start||p.time_end) && (
-                    <div style={s.eventType}>🕐 {p.time_start}{p.time_end ? ` – ${p.time_end}` : ""}</div>
-                  )}
-
-                  <div style={{display:"flex", flexDirection:"column", gap:4, marginTop:4}}>
-                    {p.artists?.map((a, ai) => {
-                      const m = ROLE_META[a.role_type] || ROLE_META.unknown;
-                      return (
-                        <div key={ai} style={{display:"flex", gap:6, alignItems:"center"}}>
-                          <span style={{...s.roleBadge, background:m.bg, color:m.color}}>{m.label}</span>
-                          <span style={s.artistName}>{a.raw_name}</span>
-                        </div>
-                      );
-                    })}
+            {Array.isArray(validationResults) && (
+              <div style={{ marginTop: 16 }}>
+                {/* Summary */}
+                <div style={s.summaryBar}>
+                  <Stat n={performances.length} label="รายการ" />
+                  <Stat n={validationResults.filter(r => r.ok).length} label="ผ่าน" color="#34D399" />
+                  <Stat n={validationResults.filter(r => !r.ok).length} label="มีปัญหา" color="#F87171" />
+                  <div style={{ marginLeft: "auto" }}>
+                    <Btn onClick={proceedToResolve} disabled={validating}>
+                      ถัดไป: Entity Resolver →
+                    </Btn>
                   </div>
                 </div>
-              ))}
-            </div>
+
+                {/* Cards */}
+                <div style={s.grid}>
+                  {validationResults.map((r, idx) => (
+                    <div key={idx} style={{
+                      ...s.card2,
+                      borderLeft: `3px solid ${r.ok ? "#34D399" : "#F87171"}`,
+                    }}>
+                      <div style={{ display: "flex", justifyContent: "space-between" }}>
+                        <span style={{ fontSize: 12, fontWeight: 600, color: "#D97706" }}>
+                          {r.perf.performance_date}
+                        </span>
+                        {!r.ok && (
+                          <button style={s.removeBtn} onClick={() => removeInvalidPerf(idx)}>✕ ลบ</button>
+                        )}
+                      </div>
+                      <div style={{ fontSize: 12, color: "#D1D5DB", margin: "4px 0" }}>
+                        📍 {[r.perf.village, r.perf.district, r.perf.province].filter(Boolean).join(" › ")}
+                      </div>
+                      {r.issues.map((issue, ii) => (
+                        <div key={ii} style={s.issueTag}>
+                          {issue.type === "duplicate" ? "🔁" : "⚠️"} {issue.msg}
+                        </div>
+                      ))}
+                      {r.ok && <div style={{ fontSize: 11, color: "#34D399" }}>✅ ผ่านการตรวจสอบ</div>}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         )}
 
-        {/* ── STEP: DONE ── */}
-        {step === "done" && (
-          <div style={{...s.card, textAlign:"center"}}>
-            <div style={{fontSize:56, marginBottom:16}}>✅</div>
-            <h2 style={{...s.cardTitle, color:"#34D399"}}>
-              บันทึกแล้ว {savedCount} รายการ
-            </h2>
-            <p style={s.hint}>ข้อมูลอยู่ใน Supabase แล้ว พร้อมสำหรับวันพรุ่งนี้</p>
-            <button style={s.primaryBtn} onClick={reset}>
-              + วันใหม่
-            </button>
+        {/* ── ENTITY RESOLVER ──────────────────────────────────────────────── */}
+        {step === "resolve" && (
+          <div>
+            <Card title="🔗 Step 3 — Entity Resolver">
+              <p style={s.hint}>จับคู่ชื่อศิลปินกับฐานข้อมูล entities</p>
+              {resolving && <p style={{ color: "#9CA3AF" }}>⏳ กำลังโหลด entities จาก Supabase...</p>}
+              {!resolving && resEntries.length > 0 && (
+                <>
+                  <div style={s.summaryBar}>
+                    <Stat n={exactCount} label="ตรงเป๊ะ" color="#34D399" />
+                    <Stat n={suggestedCount} label="ใกล้เคียง" color="#FBBF24" />
+                    <Stat n={newCount} label="ใหม่" color="#F87171" />
+                    <div style={{ marginLeft: "auto" }}>
+                      <Btn onClick={saveAll} disabled={saving}>
+                        {saving ? "⏳ กำลังบันทึก..." : `💾 บันทึก ${performances.length} รายการ`}
+                      </Btn>
+                    </div>
+                  </div>
+                  {saveErr && <Err>{saveErr}</Err>}
+                </>
+              )}
+            </Card>
+
+            {/* Entity resolution table */}
+            {!resolving && resEntries.length > 0 && (
+              <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 6 }}>
+
+                {/* Suggested — needs confirmation */}
+                {resEntries.filter(([, v]) => v.status === "suggested").length > 0 && (
+                  <Section title="⚠️ ใกล้เคียง — ยืนยันการจับคู่">
+                    {resEntries.filter(([, v]) => v.status === "suggested").map(([rawName, res]) => (
+                      <EntityRow key={rawName}
+                        rawName={rawName} res={res}
+                        onConfirm={() => confirmSuggestion(rawName)}
+                        onReject={() => rejectSuggestion(rawName)}
+                      />
+                    ))}
+                  </Section>
+                )}
+
+                {/* New — needs creation */}
+                {resEntries.filter(([, v]) => v.status === "new").length > 0 && (
+                  <Section title="🆕 ใหม่ — กำหนดชื่อ canonical">
+                    {resEntries.filter(([, v]) => v.status === "new").map(([rawName, res]) => (
+                      <NewEntityRow key={rawName}
+                        rawName={rawName} res={res}
+                        form={newEntityForms[rawName] || {}}
+                        onChange={(field, val) => updateNewForm(rawName, field, val)}
+                      />
+                    ))}
+                  </Section>
+                )}
+
+                {/* Exact — auto-matched */}
+                {exactCount > 0 && (
+                  <Section title={`✅ ตรงเป๊ะ — auto-matched (${exactCount})`} collapsed>
+                    {resEntries.filter(([, v]) => v.status === "exact").map(([rawName, res]) => (
+                      <div key={rawName} style={s.exactRow}>
+                        <span style={{ color: "#9CA3AF", fontSize: 12 }}>{rawName}</span>
+                        <span style={{ color: "#34D399", fontSize: 11 }}>→ {res.canonical_name}</span>
+                        <span style={{ ...s.roleBadge, background: ROLE[res.role_type]?.bg, color: ROLE[res.role_type]?.color }}>
+                          {ROLE[res.role_type]?.label}
+                        </span>
+                      </div>
+                    ))}
+                  </Section>
+                )}
+              </div>
+            )}
           </div>
+        )}
+
+        {/* ── DONE ─────────────────────────────────────────────────────────── */}
+        {step === "done" && (
+          <Card>
+            <div style={{ textAlign: "center", padding: "20px 0" }}>
+              <div style={{ fontSize: 56 }}>✅</div>
+              <h2 style={{ color: "#34D399", margin: "12px 0 4px" }}>บันทึกแล้ว {savedCount} รายการ</h2>
+              <p style={s.hint}>ข้อมูลอยู่ใน Supabase พร้อม entity links แล้ว</p>
+              <Btn onClick={reset} style={{ margin: "16px auto 0" }}>+ วันใหม่</Btn>
+            </div>
+          </Card>
         )}
 
       </div>
@@ -339,125 +564,111 @@ export default function MorLumSaveTool() {
   );
 }
 
+// ─── Sub-components ────────────────────────────────────────────────────────────
+function Card({ title, hint, children }) {
+  return (
+    <div style={s.card}>
+      {title && <h2 style={s.cardTitle}>{title}</h2>}
+      {hint && <p style={s.hint}>{hint}</p>}
+      {children}
+    </div>
+  );
+}
+function Label({ children }) { return <div style={s.label}>{children}</div>; }
+function Input({ value, onChange, placeholder, type }) {
+  return <input type={type || "text"} style={s.input} value={value}
+    onChange={e => onChange(e.target.value)} placeholder={placeholder} />;
+}
+function Textarea({ value, onChange, rows, mono, placeholder }) {
+  return <textarea style={{ ...s.input, height: rows * 22, resize: "vertical", fontFamily: mono ? "monospace" : "inherit", fontSize: mono ? 12 : 14 }}
+    value={value} onChange={e => onChange(e.target.value)} placeholder={placeholder} />;
+}
+function Btn({ onClick, disabled, children, secondary }) {
+  return <button style={{ ...s.btn, ...(secondary ? s.btnSecondary : {}), opacity: disabled ? 0.5 : 1 }}
+    onClick={onClick} disabled={disabled}>{children}</button>;
+}
+function Err({ children }) { return <div style={s.err}>{children}</div>; }
+function Stat({ n, label, color }) {
+  return <div style={{ textAlign: "center" }}>
+    <div style={{ fontSize: 22, fontWeight: 700, color: color || "#D97706" }}>{n}</div>
+    <div style={{ fontSize: 10, color: "#6B7280", textTransform: "uppercase" }}>{label}</div>
+  </div>;
+}
+function Section({ title, children, collapsed }) {
+  const [open, setOpen] = useState(!collapsed);
+  return (
+    <div style={{ background: "#1F2937", border: "1px solid #374151", borderRadius: 10, overflow: "hidden" }}>
+      <div style={{ padding: "10px 16px", cursor: "pointer", display: "flex", justifyContent: "space-between", alignItems: "center", borderBottom: open ? "1px solid #374151" : "none" }}
+        onClick={() => setOpen(o => !o)}>
+        <span style={{ fontSize: 13, fontWeight: 600, color: "#F3F4F6" }}>{title}</span>
+        <span style={{ color: "#6B7280" }}>{open ? "▲" : "▼"}</span>
+      </div>
+      {open && <div style={{ padding: "8px 16px 12px", display: "flex", flexDirection: "column", gap: 6 }}>{children}</div>}
+    </div>
+  );
+}
+function EntityRow({ rawName, res, onConfirm, onReject }) {
+  return (
+    <div style={{ background: "#111827", borderRadius: 8, padding: "10px 14px", display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+      <span style={{ fontSize: 13, color: "#E5E7EB", flex: "0 0 180px" }}>{rawName}</span>
+      <span style={{ fontSize: 11, color: "#6B7280" }}>→</span>
+      <span style={{ fontSize: 13, color: "#FBBF24" }}>{res.canonical_name}</span>
+      <span style={{ fontSize: 11, color: "#6B7280" }}>({Math.round(res.score * 100)}%)</span>
+      <div style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
+        <button style={{ ...s.confirmBtn }} onClick={onConfirm}>✅ ใช่</button>
+        <button style={{ ...s.rejectBtn }} onClick={onReject}>✕ ไม่ใช่</button>
+      </div>
+    </div>
+  );
+}
+function NewEntityRow({ rawName, res, form, onChange }) {
+  return (
+    <div style={{ background: "#111827", borderRadius: 8, padding: "10px 14px" }}>
+      <div style={{ fontSize: 12, color: "#9CA3AF", marginBottom: 6 }}>Raw: <span style={{ color: "#F87171" }}>{rawName}</span></div>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <input style={{ ...s.input, flex: "1 1 200px", fontSize: 13, padding: "6px 10px" }}
+          value={form.canonical_name || rawName}
+          onChange={e => onChange("canonical_name", e.target.value)}
+          placeholder="Canonical name" />
+        <select style={{ ...s.input, flex: "0 0 130px", fontSize: 13, padding: "6px 10px" }}
+          value={form.role_type || res.role_type || "unknown"}
+          onChange={e => onChange("role_type", e.target.value)}>
+          <option value="headliner">หมอลำ</option>
+          <option value="dancer_troupe">แดนซ์</option>
+          <option value="band">วง</option>
+          <option value="sound">ซาวด์</option>
+          <option value="float">รถแห่</option>
+          <option value="unknown">ไม่แน่ใจ</option>
+        </select>
+      </div>
+    </div>
+  );
+}
+
+// ─── Styles ────────────────────────────────────────────────────────────────────
 const s = {
-  root: {
-    minHeight: "100vh",
-    background: "#111827",
-    color: "#F9FAFB",
-    fontFamily: "'Sarabun', 'Noto Sans Thai', sans-serif",
-    fontSize: 14,
-  },
-  header: {
-    background: "#1F2937",
-    borderBottom: "1px solid #374151",
-    padding: "12px 20px",
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "center",
-  },
-  logo: { fontSize: 20, marginRight: 8 },
+  root: { minHeight: "100vh", background: "#111827", color: "#F9FAFB", fontFamily: "'Sarabun','Noto Sans Thai',sans-serif", fontSize: 14 },
+  header: { background: "#1F2937", borderBottom: "1px solid #374151", padding: "12px 20px", display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 },
   title: { fontSize: 16, fontWeight: 700, color: "#D97706", letterSpacing: 1 },
-  steps: { display: "flex", gap: 6, alignItems: "center" },
-  stepDot: { width: 10, height: 10, borderRadius: "50%", transition: "background 0.3s" },
-  body: { maxWidth: 900, margin: "0 auto", padding: "24px 16px 48px" },
-  card: {
-    background: "#1F2937",
-    border: "1px solid #374151",
-    borderRadius: 12,
-    padding: 24,
-    display: "flex",
-    flexDirection: "column",
-    gap: 12,
-  },
-  cardRow: { display: "flex", justifyContent: "space-between", alignItems: "center" },
-  cardTitle: { margin: 0, fontSize: 17, fontWeight: 700, color: "#F3F4F6" },
-  hint: { margin: 0, color: "#9CA3AF", lineHeight: 1.7 },
-  label: { fontSize: 12, color: "#9CA3AF", textTransform: "uppercase", letterSpacing: 1 },
-  input: {
-    background: "#111827",
-    border: "1px solid #374151",
-    borderRadius: 8,
-    padding: "10px 12px",
-    color: "#F9FAFB",
-    fontSize: 14,
-    fontFamily: "inherit",
-    outline: "none",
-    width: "100%",
-    boxSizing: "border-box",
-  },
-  primaryBtn: {
-    background: "#D97706",
-    border: "none",
-    borderRadius: 8,
-    padding: "10px 24px",
-    color: "#111827",
-    fontWeight: 700,
-    fontSize: 14,
-    cursor: "pointer",
-    fontFamily: "inherit",
-    marginTop: 4,
-    alignSelf: "flex-start",
-  },
-  ghostBtn: {
-    background: "transparent",
-    border: "1px solid #374151",
-    borderRadius: 8,
-    padding: "7px 14px",
-    color: "#9CA3AF",
-    cursor: "pointer",
-    fontSize: 13,
-    fontFamily: "inherit",
-  },
-  errorBox: {
-    background: "#1F0A0A",
-    border: "1px solid #7F1D1D",
-    borderRadius: 8,
-    padding: "10px 14px",
-    color: "#FCA5A5",
-  },
-  summaryBar: {
-    background: "#1F2937",
-    border: "1px solid #374151",
-    borderRadius: 10,
-    padding: "14px 20px",
-    display: "flex",
-    alignItems: "center",
-    gap: 28,
-    marginBottom: 16,
-  },
-  summaryItem: { display: "flex", flexDirection: "column", alignItems: "center" },
-  summaryNum: { fontSize: 24, fontWeight: 700, color: "#D97706" },
-  summaryLbl: { fontSize: 10, color: "#6B7280", textTransform: "uppercase", letterSpacing: 1 },
-  grid: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))", gap: 12 },
-  perfCard: {
-    background: "#1F2937",
-    border: "1px solid #374151",
-    borderRadius: 10,
-    padding: 14,
-    display: "flex",
-    flexDirection: "column",
-    gap: 8,
-  },
-  perfHeader: { display: "flex", justifyContent: "space-between", alignItems: "flex-start" },
-  dateChip: { fontSize: 12, fontWeight: 600, color: "#D97706" },
-  periodChip: {
-    fontSize: 11, background: "#374151", color: "#D1D5DB",
-    padding: "2px 8px", borderRadius: 10,
-  },
-  flagChip: {
-    fontSize: 11, background: "#450A0A", color: "#FCA5A5",
-    padding: "2px 8px", borderRadius: 10, border: "1px solid #7F1D1D",
-  },
-  confChip: { fontSize: 11, fontWeight: 700, padding: "2px 8px", borderRadius: 10 },
-  removeBtn: {
-    background: "transparent", border: "none",
-    color: "#4B5563", cursor: "pointer", fontSize: 14, padding: "2px 6px",
-  },
-  location: { fontSize: 13, color: "#D1D5DB", lineHeight: 1.5 },
-  eventType: { fontSize: 12, color: "#9CA3AF", fontStyle: "italic" },
-  roleBadge: {
-    fontSize: 10, fontWeight: 700, padding: "2px 7px",
-    borderRadius: 8, minWidth: 34, textAlign: "center",
-  },
-  artistName: { fontSize: 13, color: "#E5E7EB" },
+  subtitle: { fontSize: 11, color: "#6B7280", letterSpacing: 1 },
+  stepPill: { fontSize: 11, fontWeight: 600, padding: "4px 10px", borderRadius: 12, letterSpacing: 0.5 },
+  stepArrow: { color: "#374151", padding: "0 4px", fontSize: 12 },
+  body: { maxWidth: 960, margin: "0 auto", padding: "24px 16px 48px" },
+  card: { background: "#1F2937", border: "1px solid #374151", borderRadius: 12, padding: 20, display: "flex", flexDirection: "column", gap: 10, marginBottom: 16 },
+  card2: { background: "#1F2937", border: "1px solid #374151", borderRadius: 8, padding: 12 },
+  cardTitle: { margin: 0, fontSize: 16, fontWeight: 700, color: "#F3F4F6" },
+  hint: { margin: 0, color: "#9CA3AF", lineHeight: 1.7, fontSize: 13 },
+  label: { fontSize: 11, color: "#6B7280", textTransform: "uppercase", letterSpacing: 1, marginTop: 4 },
+  input: { background: "#111827", border: "1px solid #374151", borderRadius: 8, padding: "9px 12px", color: "#F9FAFB", fontSize: 14, fontFamily: "inherit", outline: "none", width: "100%", boxSizing: "border-box" },
+  btn: { background: "#D97706", border: "none", borderRadius: 8, padding: "9px 20px", color: "#111827", fontWeight: 700, fontSize: 14, cursor: "pointer", fontFamily: "inherit", alignSelf: "flex-start" },
+  btnSecondary: { background: "#374151", color: "#F9FAFB" },
+  err: { background: "#1F0A0A", border: "1px solid #7F1D1D", borderRadius: 8, padding: "10px 14px", color: "#FCA5A5" },
+  summaryBar: { background: "#111827", borderRadius: 10, padding: "12px 16px", display: "flex", alignItems: "center", gap: 24, marginBottom: 12, flexWrap: "wrap" },
+  grid: { display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(280px,1fr))", gap: 10 },
+  issueTag: { fontSize: 11, background: "#2A0A0A", border: "1px solid #7F1D1D", color: "#FCA5A5", padding: "3px 8px", borderRadius: 6, display: "inline-block", marginTop: 4 },
+  removeBtn: { background: "transparent", border: "1px solid #7F1D1D", borderRadius: 6, padding: "2px 8px", color: "#F87171", cursor: "pointer", fontSize: 11, fontFamily: "inherit" },
+  exactRow: { display: "flex", gap: 10, alignItems: "center", padding: "4px 0", borderBottom: "1px solid #1F2937" },
+  roleBadge: { fontSize: 10, fontWeight: 700, padding: "1px 6px", borderRadius: 6, minWidth: 32, textAlign: "center" },
+  confirmBtn: { background: "#052E16", border: "1px solid #166534", borderRadius: 6, padding: "4px 10px", color: "#34D399", cursor: "pointer", fontSize: 12, fontFamily: "inherit" },
+  rejectBtn: { background: "#1F0A0A", border: "1px solid #7F1D1D", borderRadius: 6, padding: "4px 10px", color: "#F87171", cursor: "pointer", fontSize: 12, fontFamily: "inherit" },
 };
