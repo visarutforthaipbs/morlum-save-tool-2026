@@ -371,8 +371,17 @@ export default function MorLumPipeline() {
           }>
             <div style={{ display: "flex", gap: 10 }}>
               <div style={{ flex: 1 }}>
-                <Label>วันที่โพสต์</Label>
-                <Input value={postDate} onChange={setPostDate} placeholder="2026-05-06" />
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", marginBottom: 2 }}>
+                  <Label>วันที่โพสต์ (optional)</Label>
+                  <div style={{ display: "flex", gap: 6 }}>
+                    <button style={s.ghostBtn} onClick={() => setPostDate(new Date().toISOString().split('T')[0])}>วันนี้</button>
+                    <button style={s.ghostBtn} onClick={() => {
+                      const d = new Date(); d.setDate(d.getDate() - 1);
+                      setPostDate(d.toISOString().split('T')[0]);
+                    }}>เมื่อวาน</button>
+                  </div>
+                </div>
+                <Input type="date" value={postDate} onChange={setPostDate} />
               </div>
             </div>
             <Label>ข้อความโพสต์ต้นฉบับ (optional)</Label>
@@ -635,6 +644,7 @@ const s = {
   input: { background: "#111827", border: "1px solid #374151", borderRadius: 8, padding: "9px 12px", color: "#F9FAFB", fontSize: 14, fontFamily: "inherit", outline: "none", width: "100%", boxSizing: "border-box" },
   btn: { background: "#D97706", border: "none", borderRadius: 8, padding: "9px 20px", color: "#111827", fontWeight: 700, fontSize: 14, cursor: "pointer", fontFamily: "inherit", alignSelf: "flex-start" },
   btnSecondary: { background: "#374151", color: "#F9FAFB" },
+  ghostBtn: { background: "transparent", border: "1px solid #374151", borderRadius: 6, padding: "2px 8px", color: "#9CA3AF", cursor: "pointer", fontSize: 11, fontFamily: "inherit" },
   err: { background: "#1F0A0A", border: "1px solid #7F1D1D", borderRadius: 8, padding: "10px 14px", color: "#FCA5A5" },
   summaryBar: { background: "#111827", borderRadius: 10, padding: "12px 16px", display: "flex", alignItems: "center", gap: 24, marginBottom: 12, flexWrap: "wrap" },
   grid: { display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(280px,1fr))", gap: 10 },
