@@ -669,7 +669,7 @@ function NewEntityRow({ rawName, res, form, onChange }) {
 
 // ─── Styles ────────────────────────────────────────────────────────────────────
 const s = {
-  root: { minHeight: "100vh", background: "#111827", color: "#F9FAFB", fontFamily: "'Sarabun','Noto Sans Thai',sans-serif", fontSize: 14 },
+  root: { minHeight: "100vh", background: "#111827", color: "#F9FAFB", fontFamily: "'DBHelvethaicaX', sans-serif", fontSize: 18 },
   header: { background: "#1F2937", borderBottom: "1px solid #374151", padding: "12px 20px", display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 },
   title: { fontSize: 16, fontWeight: 700, color: "#D97706", letterSpacing: 1 },
   subtitle: { fontSize: 11, color: "#6B7280", letterSpacing: 1 },
