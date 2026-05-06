@@ -84,6 +84,7 @@ export default function MorLumPipeline() {
   const [jsonText, setJsonText] = useState("");
   const [performances, setPerfs] = useState([]);
   const [parseErr, setParseErr] = useState(null);
+  const [parseStats, setParseStats] = useState(null);
 
   // Validator state
   const [validating, setValidating] = useState(false);
@@ -108,9 +109,22 @@ export default function MorLumPipeline() {
     try {
       const clean = jsonText.trim()
         .replace(/^```json\s*/i, "").replace(/^```/i, "").replace(/```$/i, "").trim();
-      const arr = JSON.parse(clean);
+      let arr = JSON.parse(clean);
+      let stats = null;
+
+      if (!Array.isArray(arr) && arr.performances) {
+        stats = {
+          count: arr.count,
+          expected_count: arr.expected_count,
+          completeness_ratio: arr.completeness_ratio,
+          completeness_warning: arr.completeness_warning,
+        };
+        arr = arr.performances;
+      }
+
       if (!Array.isArray(arr)) throw new Error("Expected JSON array");
       setPerfs(arr);
+      setParseStats(stats);
       setStep("validate");
     } catch (e) { setParseErr("JSON ไม่ถูกต้อง: " + e.message); }
   }
@@ -323,6 +337,7 @@ export default function MorLumPipeline() {
   function reset() {
     setJsonText(""); setRawText(""); setPostDate(""); setPerfs([]);
     setParseErr(null); setValResults(null); setResolution({}); setNewForms({});
+    setParseStats(null);
     setSaveErr(null); setSaved(0); setStep("paste");
   }
 
@@ -405,7 +420,16 @@ export default function MorLumPipeline() {
           <div>
             <Card title="🔍 Step 2 — Validator">
               <p style={s.hint}>ตรวจสอบชื่อจังหวัด และหาข้อมูลซ้ำ — แก้ไขได้เลยถ้าสะกดผิด</p>
-              <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+              
+              {parseStats?.completeness_warning && (
+                <div style={s.warningBox}>
+                  ⚠️ Parser อาจได้ไม่ครบ — คาดว่ามี ~{parseStats.expected_count} รายการ
+                  แต่ได้มา {parseStats.count} รายการ ({Math.round(parseStats.completeness_ratio * 100)}%)
+                  แนะนำให้ parse ใหม่อีกครั้ง
+                </div>
+              )}
+
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 12 }}>
                 <button style={s.ghostBtn} onClick={() => { setStep("paste"); setValResults(null); }}>← กลับแก้ JSON</button>
                 <Btn onClick={runValidation} disabled={validating}>
                   {validating ? "⏳ กำลังตรวจสอบ..." : validationResults ? "🔄 ตรวจสอบอีกครั้ง" : "🔍 เริ่มตรวจสอบ"}
@@ -678,6 +702,7 @@ const s = {
   body: { maxWidth: 960, margin: "0 auto", padding: "24px 16px 48px" },
   card: { background: "#1F2937", border: "1px solid #374151", borderRadius: 12, padding: 20, display: "flex", flexDirection: "column", gap: 10, marginBottom: 16 },
   card2: { background: "#1F2937", border: "1px solid #374151", borderRadius: 8, padding: 12 },
+  warningBox: { background: "#422006", border: "1px solid #B45309", borderRadius: 8, padding: "12px 16px", color: "#FDE68A", fontSize: 13, lineHeight: 1.5 },
   cardTitle: { margin: 0, fontSize: 16, fontWeight: 700, color: "#F3F4F6" },
   hint: { margin: 0, color: "#9CA3AF", lineHeight: 1.7, fontSize: 13 },
   label: { fontSize: 11, color: "#6B7280", textTransform: "uppercase", letterSpacing: 1, marginTop: 4 },
